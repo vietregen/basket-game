@@ -191,7 +191,7 @@ details.urlcfg input{width:100%;margin-top:8px;padding:8px 10px;border-radius:8p
    ========================================================= */
 const CFG = {
   TOTAL_Q: 10,        // questions per player
-  SECONDS: 120,       // game length (2 minutes)
+  SECONDS: 300,       // game length (5 minutes)
   POINTS: 10,         // points per correct order
   MAX_QTY_IN_BASKET: 9,
   MAX_NAME: 14,
@@ -537,13 +537,16 @@ function hostFlow(){
     for (const p of S.players.values()) if (p.connected) send(p.conn, endMsgFor(p));
     showResult();
   }
-  function resetToLobby(){
-    S.phase = 'lobby'; S.qs = null; S.ranked = [];
-    for (const [pid, p] of S.players) if (!p.connected) S.players.delete(pid);
-    for (const p of S.players.values()){ p.answered = 0; p.score = 0; p.res = []; p.lastAt = null; }
-    broadcast({ t: 'lobby', n: S.players.size });
+  // Full reset: kick everyone, close the old room and open a brand-new one (new code + QR)
+  function resetAll(){
+    clearInterval(S.tick);
+    broadcast({ t: 'kick' });
+    const old = S.peer;
+    setTimeout(() => { try { old && old.destroy(); } catch(e){} }, 400);
+    S.phase = 'lobby'; S.players = new Map(); S.joinSeq = 0; S.qs = null; S.ranked = [];
+    S.seed = 0; S.code = ''; S.peer = null; prevScores = {};
     showLobby();
-    drawQR();
+    openPeer();
   }
 
   /* ---- UI: lobby ---- */
@@ -670,14 +673,14 @@ function hostFlow(){
       <div class="title">🏆 Top 3</div>
       <div class="podium">${pod(top[1], 2)}${pod(top[0], 1)}${pod(top[2], 3)}</div>
       ${rest.length ? `<div class="rest"><div class="board" id="rest"></div></div>` : ''}
-      <div class="res-actions"><button class="btn" id="again">Play again</button></div>
+      <div class="res-actions"><button class="btn" id="again">↺ Reset · New game</button></div>
     </div>`);
     if (rest.length){
       const b = $('#rest'), cols = rest.length > 8 ? 2 : 1;
       b.style.setProperty('--cols', cols); b.style.setProperty('--rows', Math.ceil(rest.length / cols)); b.style.setProperty('--fs', '16px');
       b.innerHTML = rest.map((p, i) => `<div class="row"><div class="rk">${i + 4}</div><div class="av">${p.avatar}</div><div class="nm">${esc(p.name)}</div><div></div><div class="sc">${p.score}</div></div>`).join('');
     }
-    $('#again').onclick = resetToLobby;
+    $('#again').onclick = resetAll;
     confetti();
   }
 
@@ -701,7 +704,7 @@ function playerFlow(code){
   const P = {
     code, pid, name: '', avatar: '🙂', peer: null, conn: null, joined: false, screen: 'join',
     n: 0, seed: null, qs: null, qi: 0, score: 0, basket: new Map(), endAt: 0, timer: 0,
-    locked: false, timeUp: false, retry: 0
+    locked: false, timeUp: false, retry: 0, kicked: false
   };
   try { P.name = localStorage.getItem('vtb_name') || ''; } catch(e){}
 
@@ -749,6 +752,11 @@ function playerFlow(code){
     P.screen = 'late';
     mount(`<div class="center"><div class="panel card"><div class="emoji">⏳</div><h1>Game in progress</h1><div class="muted">Wait for the next round</div><button class="btn" id="again">Try again</button></div></div>`);
     $('#again').onclick = () => { connectingScreen(); connect(); };
+  }
+  function kickScreen(){
+    P.kicked = true; P.joined = false; P.screen = 'kicked'; stopTimer(); hideOverlay(); banner(''); clearTimeout(P.retry);
+    setTimeout(() => { try { P.peer && P.peer.destroy(); } catch(e){} }, 300);
+    mount(`<div class="center"><div class="panel card"><div class="emoji">👋</div><h1>Game over</h1><div class="muted">Scan the new QR code to join the next game</div></div></div>`);
   }
   function doneScreen(timeUp){
     P.screen = 'done'; stopTimer(); P.locked = true;
@@ -933,12 +941,13 @@ function playerFlow(code){
     peer.on('disconnected', () => { try { peer.reconnect(); } catch(e){} });
   }
   function onLost(){
-    if (P.screen === 'result') return;
+    if (P.screen === 'result' || P.kicked) return;
     banner('Connection lost — reconnecting…');
     scheduleRetry();
   }
   function scheduleRetry(){
     clearTimeout(P.retry);
+    if (P.kicked) return;
     P.retry = setTimeout(() => { banner('Connection lost — reconnecting…'); connect(); }, 2500);
   }
 
@@ -963,6 +972,7 @@ function playerFlow(code){
       case 'lobby': P.n = m.n; P.seed = null; waitScreen(); break;
       case 'end': resultScreen(m); break;
       case 'late': lateScreen(); break;
+      case 'kick': kickScreen(); break;
     }
   }
 
